@@ -1,12 +1,13 @@
-use rand::Rng;
 use rand::distributions::{Distribution, Uniform};
+use rand::Rng;
 use rayon::iter::ParallelIterator;
 use specs_dsl::{
-    data_item, system, SystemDataType,
+    data_item,
     specs::{
-        Component, VecStorage, DenseVecStorage, HashMapStorage, Entities, Builder, DispatcherBuilder, World, WorldExt,
-        System, Read, ReadStorage, WriteStorage, LazyUpdate, Join, ParJoin,
-    }
+        Builder, Component, DenseVecStorage, DispatcherBuilder, Entities, Entity, HashMapStorage, Join, LazyUpdate,
+        ParJoin, Read, ReadStorage, VecStorage, World, WorldExt, WriteStorage,
+    },
+    system, SystemDataType,
 };
 
 const TAU: f32 = 2. * std::f32::consts::PI;
@@ -32,84 +33,97 @@ pub struct Pos(f32, f32);
 pub struct Vel(f32, f32);
 
 #[data_item]
-#[system_data(ChangePosData)]
-pub struct ChangePos<'a> {
-    pub pos: &'a mut Pos,
-    pub vel: &'a Vel,
+#[system_data(PosChangeData)]
+pub struct PosChange<'a> {
+    pub position: &'a mut Pos,
+    pub velocity: &'a Vel,
 }
 
 struct PhysicsSystem;
 
-#[system(ChangePosData)]
+#[system(PosChangeData)]
 impl PhysicsSystem {
     #[run]
     fn change_pos(&mut self, mut data: SystemDataType<Self>) {
         data.view_mut().par_join().for_each(|item| {
-            let mut item: ChangePos = item.into();
+            let mut item: PosChange = item.into();
 
-            item.pos.0 += item.vel.0;
-            item.pos.1 += item.vel.1;
+            item.position.0 += item.velocity.0;
+            item.position.1 += item.velocity.1;
         });
     }
 }
 
+#[data_item]
+struct BombChange<'a> {
+    #[entity]
+    entity: Entity,
+    bomb: &'a mut ClusterBomb,
+    position: &'a Pos,
+}
+
+type ClusterBombSystemData<'a> = (
+    Entities<'a>,
+    WriteStorage<'a, ClusterBomb>,
+    ReadStorage<'a, Pos>,
+    Read<'a, LazyUpdate>,
+);
 
 struct ClusterBombSystem;
 
-impl<'a> System<'a> for ClusterBombSystem {
-    type SystemData = (
-        Entities<'a>,
-        WriteStorage<'a, ClusterBomb>,
-        ReadStorage<'a, Pos>,
-        // Allows lazily adding and removing components to entities
-        // or executing arbitrary code with world access lazily via `execute`.
-        Read<'a, LazyUpdate>,
-    );
-
-    fn run(&mut self, (entities, mut bombs, positions, updater): Self::SystemData) {
+#[system(ClusterBombSystemData)]
+impl ClusterBombSystem {
+    #[run]
+    fn boom(&mut self, (entities, mut bombs, positions, updater): SystemDataType<Self>) {
         let durability_range = Uniform::new(10, 20);
         // Join components in potentially parallel way using rayon.
-        (&entities, &mut bombs, &positions)
-            .par_join()
-            .for_each(|(entity, bomb, position)| {
-                let mut rng = rand::thread_rng();
+        (&entities, &mut bombs, &positions).par_join().for_each(|item| {
+            let item: BombChange = item.into();
+            let mut rng = rand::thread_rng();
 
-                if bomb.fuse == 0 {
-                    let _ = entities.delete(entity);
-                    for _ in 0..9 {
-                        let shrapnel = entities.create();
-                        updater.insert(
-                            shrapnel,
-                            Shrapnel {
-                                durability: durability_range.sample(&mut rng),
-                            },
-                        );
-                        updater.insert(shrapnel, position.clone());
-                        let angle: f32 = rng.gen::<f32>() * TAU;
-                        updater.insert(shrapnel, Vel(angle.sin(), angle.cos()));
-                    }
-                } else {
-                    bomb.fuse -= 1;
+            if item.bomb.fuse == 0 {
+                let _ = entities.delete(item.entity);
+                for _ in 0..9 {
+                    let shrapnel = entities.create();
+                    updater.insert(
+                        shrapnel,
+                        Shrapnel {
+                            durability: durability_range.sample(&mut rng),
+                        },
+                    );
+                    updater.insert(shrapnel, item.position.clone());
+                    let angle: f32 = rng.gen::<f32>() * TAU;
+                    updater.insert(shrapnel, Vel(angle.sin(), angle.cos()));
                 }
-            });
+            } else {
+                item.bomb.fuse -= 1;
+            }
+        });
     }
+}
+
+#[data_item]
+#[system_data(ShrapnelChangeData)]
+struct ShrapnelChange<'a> {
+    entity: Entity,
+    shrapnel: &'a mut Shrapnel,
 }
 
 struct ShrapnelSystem;
 
-impl<'a> System<'a> for ShrapnelSystem {
-    type SystemData = (Entities<'a>, WriteStorage<'a, Shrapnel>);
+#[system(ShrapnelChangeData)]
+impl ShrapnelSystem {
+    #[run]
+    fn change_shrapnel(&mut self, (entities, mut shrapnels): SystemDataType<Self>) {
+        (&entities, &mut shrapnels).par_join().for_each(|item| {
+            let item: ShrapnelChange = item.into();
 
-    fn run(&mut self, (entities, mut shrapnels): Self::SystemData) {
-        (&entities, &mut shrapnels)
-            .par_join()
-            .for_each(|(entity, shrapnel)| {
-                if shrapnel.durability == 0 {
-                    let _ = entities.delete(entity);
-                } else {
-                    shrapnel.durability -= 1;
-                }
-            });
+            if item.shrapnel.durability == 0 {
+                let _ = entities.delete(item.entity);
+            } else {
+                item.shrapnel.durability -= 1;
+            }
+        });
     }
 }
 

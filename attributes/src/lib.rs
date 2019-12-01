@@ -1,7 +1,7 @@
 extern crate proc_macro;
 
 use proc_macro2::{Ident, Literal, Span, TokenStream};
-use quote::quote;
+use quote::{quote, ToTokens};
 use syn;
 
 const CRATE_NAME: &str = "specs_dsl";
@@ -35,14 +35,11 @@ fn expand_data_item(input: TokenStream) -> TokenStream {
     let mut item = parse_struct(input);
 
     let crate_name = crate_name();
-    let vis = &item.vis;
     let Lifetimes {
         item_lifetime,
         ext_lifetime,
         ext_generics,
     } = get_lifetimes(&item);
-    let (impl_generics, type_generics, where_clause) = item.generics.split_for_impl();
-    let item_type_name = &item.ident;
 
     let item_tuple = syn::TypeTuple {
         paren_token: Default::default(),
@@ -57,19 +54,21 @@ fn expand_data_item(input: TokenStream) -> TokenStream {
             quote! { #ident: t.#i }
         })
         .collect();
+    let fields = extract_field_data(&mut item);
 
     let system_data_attr = extract_attr(&mut item.attrs, "system_data");
+    let vis = &item.vis;
     let system_data_defs = system_data_attr.map(|attr| {
         let type_name = attr.parse_args::<syn::Ident>().expect("Cannot parse system data name");
         let lifetime = syn::Lifetime::new("'a", Span::call_site());
-        let storages = storages(&lifetime, &item);
+        let storages = storages(&lifetime, None, &fields);
         let view_store_lifetime = syn::Lifetime::new("'b", Span::call_site());
         let MainViews {
             view_type,
             view_ret,
             view_mut_type,
             view_mut_ret
-        } = storages_main_views(&view_store_lifetime, &lifetime, &item);
+        } = storages_main_views(&view_store_lifetime, &lifetime, &fields);
         let main_views_trait_name = syn::Ident::new(&format!("{}MainView", type_name), Span::call_site());
 
         quote! {
@@ -99,7 +98,9 @@ fn expand_data_item(input: TokenStream) -> TokenStream {
     });
 
     let (impl_data_view_generics, _, _) = ext_generics.split_for_impl();
-    let storages_ref = storages_refs(&ext_lifetime, &item_lifetime, &item);
+    let storages_ref = storages(&ext_lifetime, Some(&item_lifetime), &fields);
+    let (impl_generics, type_generics, where_clause) = item.generics.split_for_impl();
+    let item_type_name = &item.ident;
 
     quote! {
         #item
@@ -130,8 +131,10 @@ fn expand_system(attrs: TokenStream, input: TokenStream) -> TokenStream {
 
     let crate_name = crate_name();
     let system_type = (*item.self_ty).clone();
-    let run_method = item.items.iter_mut().find_map(|item| {
-        match item {
+    let run_method = item
+        .items
+        .iter_mut()
+        .find_map(|item| match item {
             syn::ImplItem::Method(method) => {
                 if extract_attr(&mut method.attrs, "run").is_some() {
                     Some(method.sig.ident.clone())
@@ -140,8 +143,8 @@ fn expand_system(attrs: TokenStream, input: TokenStream) -> TokenStream {
                 }
             }
             _ => None,
-        }
-    }).expect("Cannot find the run-annotated method");
+        })
+        .expect("Cannot find the run-annotated method");
 
     quote! {
         #item
@@ -225,52 +228,97 @@ fn crate_name() -> Ident {
     Ident::new(CRATE_NAME, Span::call_site())
 }
 
-fn storages(store_lifetime: &syn::Lifetime, item: &syn::ItemStruct) -> TokenStream {
-    let storages: Vec<_> = item
-        .fields
-        .iter()
-        .map(|field| {
-            let (is_mut, field_type) = match &field.ty {
-                syn::Type::Reference(ref_type) => (ref_type.mutability.is_some(), (*ref_type.elem).clone()),
-                _ => (false, field.ty.clone()),
-            };
-            let is_resource = get_attr(&field.attrs, "resource").is_some();
-            let crate_name = crate_name();
-            let store = match (is_mut, is_resource) {
-                (true, true) => quote! { #crate_name::specs::Write },
-                (false, true) => quote! { #crate_name::specs::Read },
-                (true, false) => quote! { #crate_name::specs::WriteStorage },
-                (false, false) => quote! { #crate_name::specs::ReadStorage },
-            };
-            quote! { #store<#store_lifetime, #field_type> }
-        })
-        .collect();
+enum ItemFieldKind {
+    Entity,
+    Component,
+    Resource,
+    MutComponent,
+    MutResource,
+}
 
-    if storages.len() == 1 {
-        storages.into_iter().next().unwrap()
-    } else {
-        quote! { (#(#storages),*) }
+impl ItemFieldKind {
+    fn is_mut(&self) -> bool {
+        match self {
+            ItemFieldKind::MutComponent | ItemFieldKind::MutResource => true,
+            _ => false,
+        }
     }
 }
 
-fn storages_refs(store_lifetime: &syn::Lifetime, refs_lifetime: &syn::Lifetime, item: &syn::ItemStruct) -> TokenStream {
-    let storages: Vec<_> = item
-        .fields
-        .iter()
+struct ItemFieldData {
+    kind: ItemFieldKind,
+    field_type: syn::Type,
+}
+
+fn extract_field_data(item: &mut syn::ItemStruct) -> Vec<ItemFieldData> {
+    item.fields
+        .iter_mut()
         .map(|field| {
             let (is_mut, field_type) = match &field.ty {
                 syn::Type::Reference(ref_type) => (ref_type.mutability.is_some(), (*ref_type.elem).clone()),
                 _ => (false, field.ty.clone()),
             };
-            let is_resource = get_attr(&field.attrs, "resource").is_some();
-            let crate_name = crate_name();
-            let store = match (is_mut, is_resource) {
-                (true, true) => quote! { &#refs_lifetime mut #crate_name::specs::Write },
-                (false, true) => quote! { &#refs_lifetime #crate_name::specs::Read },
-                (true, false) => quote! { &#refs_lifetime mut #crate_name::specs::WriteStorage },
-                (false, false) => quote! { &#refs_lifetime #crate_name::specs::ReadStorage },
+            let is_entity = extract_attr(&mut field.attrs, "entity").is_some()
+                || format!("{}", field.ty.to_token_stream()).as_str() == "Entity";
+            let is_resource = extract_attr(&mut field.attrs, "resource").is_some();
+            let is_component = extract_attr(&mut field.attrs, "component").is_some() || (!is_entity && !is_resource);
+
+            let kind = if is_component {
+                if is_mut {
+                    ItemFieldKind::MutComponent
+                } else {
+                    ItemFieldKind::Component
+                }
+            } else if is_resource {
+                if is_mut {
+                    ItemFieldKind::MutResource
+                } else {
+                    ItemFieldKind::Resource
+                }
+            } else if is_entity {
+                ItemFieldKind::Entity
+            } else {
+                unreachable!("Unsupported item kind")
             };
-            quote! { #store<#store_lifetime, #field_type> }
+
+            ItemFieldData {
+                kind,
+                field_type,
+            }
+        })
+        .collect()
+}
+
+fn storages(
+    store_lifetime: &syn::Lifetime,
+    refs_lifetime: Option<&syn::Lifetime>,
+    fields: &[ItemFieldData],
+) -> TokenStream {
+    let crate_name = crate_name();
+    let storages: Vec<_> = fields
+        .iter()
+        .map(|field| {
+            let ref_part = refs_lifetime
+                .map(|lifetime| quote! { &#lifetime })
+                .unwrap_or_else(|| quote! {});
+            let ref_mut_part = refs_lifetime
+                .map(|lifetime| quote! { &#lifetime mut })
+                .unwrap_or_else(|| quote! {});
+            let field_type = &field.field_type;
+
+            match field.kind {
+                ItemFieldKind::Entity => quote! { #ref_part #crate_name::specs::Entities<#store_lifetime> },
+                ItemFieldKind::Component => {
+                    quote! { #ref_part #crate_name::specs::ReadStorage<#store_lifetime, #field_type> }
+                }
+                ItemFieldKind::Resource => quote! { #ref_part #crate_name::specs::Read<#store_lifetime, #field_type> },
+                ItemFieldKind::MutComponent => {
+                    quote! { #ref_mut_part #crate_name::specs::WriteStorage<#store_lifetime, #field_type> }
+                }
+                ItemFieldKind::MutResource => {
+                    quote! { #ref_mut_part #crate_name::specs::Write<#store_lifetime, #field_type> }
+                }
+            }
         })
         .collect();
 
@@ -291,36 +339,31 @@ struct MainViews {
 fn storages_main_views(
     store_lifetime: &syn::Lifetime,
     refs_lifetime: &syn::Lifetime,
-    item: &syn::ItemStruct,
+    fields: &[ItemFieldData],
 ) -> MainViews {
+    let crate_name = crate_name();
     let mut view_indexes = vec![];
-    let view_storages: Vec<_> = item
-        .fields
+    let view_storages: Vec<_> = fields
         .iter()
         .enumerate()
         .filter_map(|(idx, field)| {
-            let field_type = match &field.ty {
-                syn::Type::Reference(ref_type) => {
-                    if ref_type.mutability.is_none() {
-                        Some((*ref_type.elem).clone())
-                    } else {
-                        None
-                    }
+            let field_type = &field.field_type;
+
+            let store = match field.kind {
+                ItemFieldKind::Entity => Some(quote! { &#refs_lifetime #crate_name::specs::Entities<#store_lifetime> }),
+                ItemFieldKind::Component => {
+                    Some(quote! { &#refs_lifetime #crate_name::specs::ReadStorage<#store_lifetime, #field_type> })
                 }
-                _ => Some(field.ty.clone()),
+                ItemFieldKind::Resource => {
+                    Some(quote! { &#refs_lifetime #crate_name::specs::Read<#store_lifetime, #field_type> })
+                }
+                _ => None,
             };
 
-            field_type.map(|field_type| {
-                let is_resource = get_attr(&field.attrs, "resource").is_some();
-                let crate_name = crate_name();
-                let store = if is_resource {
-                    quote! { &#refs_lifetime #crate_name::specs::Read }
-                } else {
-                    quote! { &#refs_lifetime #crate_name::specs::ReadStorage }
-                };
+            if store.is_some() {
                 view_indexes.push(idx);
-                quote! { #store<#store_lifetime, #field_type> }
-            })
+            }
+            store
         })
         .collect();
 
@@ -337,18 +380,18 @@ fn storages_main_views(
         (quote! { (#(#view_storages),*) }, quote! { (#(#refs),*) })
     };
 
-    let (view_mut_type, view_mut_ret) = if view_indexes.len() == item.fields.len() {
+    let (view_mut_type, view_mut_ret) = if view_indexes.len() == fields.len() {
         (quote! { () }, quote! { () })
     } else {
-        let ret_tuple_fields: Vec<_> = item
-            .fields
+        let ret_tuple_fields: Vec<_> = fields
             .iter()
             .enumerate()
             .map(|(i, field)| {
                 let i = Literal::usize_unsuffixed(i);
-                match &field.ty {
-                    syn::Type::Reference(ref_type) if ref_type.mutability.is_some() => quote! { &mut self.#i },
-                    _ => quote! { &self.#i },
+                if field.kind.is_mut() {
+                    quote! { &mut self.#i }
+                } else {
+                    quote! { &self.#i }
                 }
             })
             .collect();
@@ -359,7 +402,7 @@ fn storages_main_views(
             quote! { (#(#ret_tuple_fields),*) }
         };
 
-        (storages_refs(store_lifetime, refs_lifetime, item), ret)
+        (storages(store_lifetime, Some(refs_lifetime), fields), ret)
     };
 
     MainViews {
@@ -385,6 +428,8 @@ mod tests {
             }
         };
         let output = expand_data_item(item).to_string();
+
+        #[rustfmt::skip]
         assert_eq!(output, "\
 # [ derive ( Clone , Copy ) ] \
 struct PosVel < 'a > { \
@@ -430,6 +475,8 @@ fn view_mut ( & 'a mut self ) -> Self :: ViewAllWithMut { \
             }
         };
         let output = expand_system(attrs, item).to_string();
+
+        #[rustfmt::skip]
         assert_eq!(output, "\
 impl PhysicsSystem { \
 fn change_pos ( & mut self , mut data : SystemDataType < Self > ) { \
