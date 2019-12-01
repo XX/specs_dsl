@@ -4,7 +4,7 @@ pub trait DataItem<'a, 'b> {
     type View;
 }
 
-pub type DataType<'a, S> = <S as System<'a>>::SystemData;
+pub type SystemDataType<'a, S> = <S as System<'a>>::SystemData;
 
 pub type DataView<'a, 'b, T> = <T as DataItem<'a, 'b>>::View;
 

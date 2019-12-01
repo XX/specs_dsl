@@ -2,7 +2,7 @@ use rand::Rng;
 use rand::distributions::{Distribution, Uniform};
 use rayon::iter::ParallelIterator;
 use specs_dsl::{
-    data_item, DataType,
+    data_item, system, SystemDataType,
     specs::{
         Component, VecStorage, DenseVecStorage, HashMapStorage, Entities, Builder, DispatcherBuilder, World, WorldExt,
         System, Read, ReadStorage, WriteStorage, LazyUpdate, Join, ParJoin,
@@ -40,24 +40,16 @@ pub struct ChangePos<'a> {
 
 struct PhysicsSystem;
 
-//#[system(ChangePosData)]
+#[system(ChangePosData)]
 impl PhysicsSystem {
-//    #[run]
-    fn change_pos(&mut self, mut data: DataType<Self>) {
+    #[run]
+    fn change_pos(&mut self, mut data: SystemDataType<Self>) {
         data.view_mut().par_join().for_each(|item| {
             let mut item: ChangePos = item.into();
 
             item.pos.0 += item.vel.0;
             item.pos.1 += item.vel.1;
         });
-    }
-}
-
-impl<'a> System<'a> for PhysicsSystem {
-    type SystemData = ChangePosData<'a>;
-
-    fn run(&mut self, data: Self::SystemData) {
-        self.change_pos(data);
     }
 }
 

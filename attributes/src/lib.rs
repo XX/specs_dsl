@@ -16,6 +16,11 @@ pub fn data_view(attrs: proc_macro::TokenStream, item: proc_macro::TokenStream) 
     expand_data_view(attrs.into(), item.into()).into()
 }
 
+#[proc_macro_attribute]
+pub fn system(attrs: proc_macro::TokenStream, item: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    expand_system(attrs.into(), item.into()).into()
+}
+
 trait AttributeUtils {
     fn is_name(&self, name: &str) -> bool;
 }
@@ -117,6 +122,38 @@ fn expand_data_item(input: TokenStream) -> TokenStream {
 
 fn expand_data_view(_attrs: TokenStream, _input: TokenStream) -> TokenStream {
     unimplemented!();
+}
+
+fn expand_system(attrs: TokenStream, input: TokenStream) -> TokenStream {
+    let system_data = syn::parse2::<syn::Ident>(attrs).expect("Failed parse attribute parameter");
+    let mut item = syn::parse2::<syn::ItemImpl>(input).expect("Failed parse system impl block");
+
+    let crate_name = crate_name();
+    let system_type = (*item.self_ty).clone();
+    let run_method = item.items.iter_mut().find_map(|item| {
+        match item {
+            syn::ImplItem::Method(method) => {
+                if extract_attr(&mut method.attrs, "run").is_some() {
+                    Some(method.sig.ident.clone())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }).expect("Cannot find the run-annotated method");
+
+    quote! {
+        #item
+
+        impl<'a> #crate_name::specs::System<'a> for #system_type {
+            type SystemData = #system_data<'a>;
+
+            fn run(&mut self, data: Self::SystemData) {
+                self.#run_method(data);
+            }
+        }
+    }
 }
 
 fn parse_struct(input: TokenStream) -> syn::ItemStruct {
@@ -338,7 +375,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn expand_macro() {
+    fn test_expand_data_item() {
         let item = quote! {
             #[system_data(PosVelSystemData)]
             #[derive(Clone, Copy)]
@@ -377,6 +414,32 @@ fn view ( & 'a self ) -> Self :: ViewAllImmutable { \
 } \
 fn view_mut ( & 'a mut self ) -> Self :: ViewAllWithMut { \
 ( & mut self . 0 , & self . 1 ) \
+} \
+}");
+    }
+
+    #[test]
+    fn test_expand_system() {
+        let attrs = quote! { Test };
+        let item = quote! {
+            impl PhysicsSystem {
+                #[run]
+                fn change_pos(&mut self, mut data: SystemDataType<Self>) {
+                    unimplemented!()
+                }
+            }
+        };
+        let output = expand_system(attrs, item).to_string();
+        assert_eq!(output, "\
+impl PhysicsSystem { \
+fn change_pos ( & mut self , mut data : SystemDataType < Self > ) { \
+unimplemented ! ( ) \
+} \
+} \
+impl < 'a > specs_dsl :: specs :: System < 'a > for PhysicsSystem { \
+type SystemData = Test < 'a > ; \
+fn run ( & mut self , data : Self :: SystemData ) { \
+self . change_pos ( data ) ; \
 } \
 }");
     }
