@@ -3,7 +3,6 @@ extern crate proc_macro;
 use proc_macro2::{Ident, Literal, Span, TokenStream};
 use quote::quote;
 use syn;
-use syn::{Attribute, Item, Type};
 
 const CRATE_NAME: &str = "specs_dsl";
 
@@ -21,7 +20,7 @@ trait AttributeUtils {
     fn is_name(&self, name: &str) -> bool;
 }
 
-impl AttributeUtils for Attribute {
+impl AttributeUtils for syn::Attribute {
     fn is_name(&self, name: &str) -> bool {
         self.path.get_ident().map(|ident| ident == name).unwrap_or_default()
     }
@@ -56,7 +55,7 @@ fn expand_data_item(input: TokenStream) -> TokenStream {
 
     let system_data_attr = extract_attr(&mut item.attrs, "system_data");
     let system_data_defs = system_data_attr.map(|attr| {
-        let type_name = attr.parse_args::<Type>().expect("Cannot parse system data name");
+        let type_name = attr.parse_args::<syn::Ident>().expect("Cannot parse system data name");
         let lifetime = syn::Lifetime::new("'a", Span::call_site());
         let storages = storages(&lifetime, &item);
         let view_store_lifetime = syn::Lifetime::new("'b", Span::call_site());
@@ -66,11 +65,20 @@ fn expand_data_item(input: TokenStream) -> TokenStream {
             view_mut_type,
             view_mut_ret
         } = storages_main_views(&view_store_lifetime, &lifetime, &item);
+        let main_views_trait_name = syn::Ident::new(&format!("{}MainView", type_name), Span::call_site());
 
         quote! {
             #vis type #type_name<#lifetime> = #storages;
 
-            impl<#lifetime, #view_store_lifetime: #lifetime> #crate_name::MainView<#lifetime> for #type_name<#view_store_lifetime> {
+            pub trait #main_views_trait_name<'a> {
+                type ViewAllImmutable;
+                type ViewAllWithMut;
+
+                fn view(&'a self) -> Self::ViewAllImmutable;
+                fn view_mut(&'a mut self) -> Self::ViewAllWithMut;
+            }
+
+            impl<#lifetime, #view_store_lifetime: #lifetime> #main_views_trait_name<#lifetime> for #type_name<#view_store_lifetime> {
                 type ViewAllImmutable = #view_type;
                 type ViewAllWithMut = #view_mut_type;
 
@@ -114,7 +122,7 @@ fn expand_data_view(_attrs: TokenStream, _input: TokenStream) -> TokenStream {
 fn parse_struct(input: TokenStream) -> syn::ItemStruct {
     let item = syn::parse2(input).expect("Failed parse input token stream");
     match item {
-        Item::Struct(item) => item,
+        syn::Item::Struct(item) => item,
         _ => panic!("The data item must be a struct"),
     }
 }
@@ -164,11 +172,11 @@ fn get_lifetimes(item: &syn::ItemStruct) -> Lifetimes {
     }
 }
 
-fn get_attr<'a>(attrs: &'a [Attribute], name: &str) -> Option<&'a syn::Attribute> {
+fn get_attr<'a>(attrs: &'a [syn::Attribute], name: &str) -> Option<&'a syn::Attribute> {
     attrs.iter().find(|attr| attr.is_name(name))
 }
 
-fn extract_attr(attrs: &mut Vec<Attribute>, name: &str) -> Option<syn::Attribute> {
+fn extract_attr(attrs: &mut Vec<syn::Attribute>, name: &str) -> Option<syn::Attribute> {
     attrs
         .iter()
         .enumerate()
@@ -332,7 +340,7 @@ mod tests {
     #[test]
     fn expand_macro() {
         let item = quote! {
-            #[system_data(PhysicsSystemData)]
+            #[system_data(PosVelSystemData)]
             #[derive(Clone, Copy)]
             struct PosVel<'a> {
                 pos: &'a mut Pos,
@@ -354,8 +362,14 @@ Self { pos : t . 0 , vel : t . 1 } \
 impl < 'a , 'ba : 'a > specs_dsl :: DataItem < 'a , 'ba > for PosVel < 'a > { \
 type View = ( & 'a mut specs_dsl :: specs :: WriteStorage < 'ba , Pos > , & 'a specs_dsl :: specs :: ReadStorage < 'ba , Vel > ) ; \
 } \
-type PhysicsSystemData < 'a > = ( specs_dsl :: specs :: WriteStorage < 'a , Pos > , specs_dsl :: specs :: ReadStorage < 'a , Vel > ) ; \
-impl < 'a , 'b : 'a > specs_dsl :: MainView < 'a > for PhysicsSystemData < 'b > { \
+type PosVelSystemData < 'a > = ( specs_dsl :: specs :: WriteStorage < 'a , Pos > , specs_dsl :: specs :: ReadStorage < 'a , Vel > ) ; \
+pub trait PosVelSystemDataMainView < 'a > { \
+type ViewAllImmutable ; \
+type ViewAllWithMut ; \
+fn view ( & 'a self ) -> Self :: ViewAllImmutable ; \
+fn view_mut ( & 'a mut self ) -> Self :: ViewAllWithMut ; \
+} \
+impl < 'a , 'b : 'a > PosVelSystemDataMainView < 'a > for PosVelSystemData < 'b > { \
 type ViewAllImmutable = & 'a specs_dsl :: specs :: ReadStorage < 'b , Vel > ; \
 type ViewAllWithMut = ( & 'a mut specs_dsl :: specs :: WriteStorage < 'b , Pos > , & 'a specs_dsl :: specs :: ReadStorage < 'b , Vel > ) ; \
 fn view ( & 'a self ) -> Self :: ViewAllImmutable { \

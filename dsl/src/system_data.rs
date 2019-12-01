@@ -8,7 +8,7 @@ pub type DataType<'a, S> = <S as System<'a>>::SystemData;
 
 pub type DataView<'a, 'b, T> = <T as DataItem<'a, 'b>>::View;
 
-trait MainView<'a> {
+pub trait MainView<'a> {
     type ViewAllImmutable;
     type ViewAllWithMut;
 
