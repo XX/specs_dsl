@@ -1,0 +1,13 @@
+[package]
+name = "specs_dsl_attributes"
+version = "0.1.0"
+authors = ["Alexander XX <freecoder.xx@gmail.com>"]
+edition = "2018"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1.0.6"
+syn = { version = "1.0.5", features = ["full"] }
+quote = "1.0.2"
