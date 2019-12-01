@@ -56,7 +56,6 @@ impl PhysicsSystem {
 
 #[data_item]
 struct BombChange<'a> {
-    #[entity]
     entity: Entity,
     bomb: &'a mut ClusterBomb,
     position: &'a Pos,
